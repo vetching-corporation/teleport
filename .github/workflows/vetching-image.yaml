@@ -20,9 +20,20 @@ permissions:
   contents: read
   packages: write
 
+env:
+  BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version || '18.11.3' }}
+  IMAGE: ghcr.io/${{ github.repository_owner }}/teleport-oidc
+
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -58,18 +69,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
-        env:
-          BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version || '18.11.3' }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/teleport-oidc
+      - name: Build and push the per-architecture image
         run: |
           cat > build/Dockerfile <<'EOF'
           ARG BASE_IMAGE
           FROM ${BASE_IMAGE}
           COPY teleport /usr/local/bin/teleport
           EOF
-          tag="$(build/teleport version --raw 2>/dev/null || true)"
-          tag="${tag:-dev}-${GITHUB_SHA::12}"
-          docker build --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE}" -t "${IMAGE}:${tag}" build
+          tag="${GITHUB_SHA::12}-${{ matrix.arch }}"
+          docker build --platform "linux/${{ matrix.arch }}" --provenance=false --build-arg BASE_IMAGE="${BASE_IMAGE}" -t "${IMAGE}:${tag}" build
           docker push "${IMAGE}:${tag}"
-          echo "image: ${IMAGE}:${tag}" >> "$GITHUB_STEP_SUMMARY"
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the multi-architecture tag
+        run: |
+          sha="${GITHUB_SHA::12}"
+          docker buildx imagetools create -t "${IMAGE}:${sha}" "${IMAGE}:${sha}-arm64" "${IMAGE}:${sha}-amd64"
+          docker buildx imagetools inspect "${IMAGE}:${sha}"
+          echo "image: ${IMAGE}:${sha}" >> "$GITHUB_STEP_SUMMARY"
