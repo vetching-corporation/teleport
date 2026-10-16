@@ -2,6 +2,13 @@
 name: vetching-image
 
 on:
+  push:
+    branches:
+      - feat/console-oidc-login-18.11
+    paths:
+      - .github/workflows/vetching-image.yaml
+      - lib/**
+      - tool/**
   workflow_dispatch:
     inputs:
       base_image_version:
@@ -53,7 +60,7 @@ jobs:
 
       - name: Build and push image
         env:
-          BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version }}
+          BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version || '18.11.3' }}
           IMAGE: ghcr.io/${{ github.repository_owner }}/teleport-oidc
         run: |
           cat > build/Dockerfile <<'EOF'
