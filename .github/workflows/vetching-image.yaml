@@ -1,4 +1,4 @@
-# Builds the Teleport server image used by the vetching bastion: the official distroless debug image with the teleport binary replaced by this fork's build (OSS OIDC connector).
+# Builds the Teleport server image for the vetching bastion: the official distroless debug image with the teleport binary replaced by this fork's build (OSS OIDC connector).
 name: vetching-image
 
 on:
