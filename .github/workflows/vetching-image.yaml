@@ -1,5 +1,4 @@
 # Builds the Teleport server image for the vetching bastion: the official distroless debug image with the teleport binary replaced by this fork's build (OSS OIDC connector).
-# The repository only allows local actions, so every step is a plain shell command.
 name: vetching-image
 
 on:
@@ -24,8 +23,6 @@ permissions:
 env:
   BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version || '18.11.3' }}
   IMAGE: ghcr.io/${{ github.repository_owner }}/teleport-oidc
-  GO_VERSION: 1.25.14
-  NODE_VERSION: 24.19.0
 
 jobs:
   build:
@@ -37,31 +34,21 @@ jobs:
           - arch: amd64
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 120
     steps:
-      - name: Check out this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git init -q .
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch -q --depth 1 origin "${GITHUB_SHA}"
-          git checkout -q FETCH_HEAD
+      - uses: actions/checkout@v4
 
-      - name: Install Go and Node
-        run: |
-          mkdir -p "${RUNNER_TEMP}/tools"
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${{ matrix.arch }}.tar.gz" | tar -xz -C "${RUNNER_TEMP}/tools"
-          node_arch="${{ matrix.arch }}"; [ "$node_arch" = amd64 ] && node_arch=x64
-          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" | tar -xJ -C "${RUNNER_TEMP}/tools"
-          echo "${RUNNER_TEMP}/tools/go/bin" >> "$GITHUB_PATH"
-          echo "${RUNNER_TEMP}/tools/node-v${NODE_VERSION}-linux-${node_arch}/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
 
       - name: Install wasm toolchain for the web UI
         run: |
-          go version
-          node --version
-          corepack enable pnpm
           rustup target add wasm32-unknown-unknown
           make ensure-wasm-bindgen ensure-wasm-opt
 
@@ -76,11 +63,14 @@ jobs:
       - name: Check binary
         run: build/teleport version
 
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and push the per-architecture image
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           cat > build/Dockerfile <<'EOF'
           ARG BASE_IMAGE
           FROM ${BASE_IMAGE}
@@ -94,11 +84,16 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish the multi-architecture tag
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           sha="${GITHUB_SHA::12}"
           docker buildx imagetools create -t "${IMAGE}:${sha}" "${IMAGE}:${sha}-arm64" "${IMAGE}:${sha}-amd64"
           docker buildx imagetools inspect "${IMAGE}:${sha}"
