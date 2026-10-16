@@ -1,0 +1,68 @@
+# Builds the Teleport server image used by the vetching bastion: the official distroless debug image with the teleport binary replaced by this fork's build (OSS OIDC connector).
+name: vetching-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image_version:
+        description: Official teleport-distroless-debug tag that provides tctl, tsh, tbot and the runtime layout
+        required: true
+        default: 18.11.3
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Install wasm toolchain for the web UI
+        run: |
+          rustup target add wasm32-unknown-unknown
+          make ensure-wasm-bindgen ensure-wasm-opt
+
+      - name: Build web assets
+        run: make ensure-webassets
+
+      - name: Build teleport with embedded web assets
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags webassets_embed -trimpath -o build/teleport ./tool/teleport
+
+      - name: Check binary
+        run: build/teleport version
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        env:
+          BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/teleport-oidc
+        run: |
+          cat > build/Dockerfile <<'EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          COPY teleport /usr/local/bin/teleport
+          EOF
+          tag="$(build/teleport version --raw 2>/dev/null || true)"
+          tag="${tag:-dev}-${GITHUB_SHA::12}"
+          docker build --platform linux/arm64 --build-arg BASE_IMAGE="${BASE_IMAGE}" -t "${IMAGE}:${tag}" build
+          docker push "${IMAGE}:${tag}"
+          echo "image: ${IMAGE}:${tag}" >> "$GITHUB_STEP_SUMMARY"

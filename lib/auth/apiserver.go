@@ -167,6 +167,7 @@ func NewAPIServer(config *APIConfig) (http.Handler, error) {
 
 	// SSO validation handlers
 	srv.POST("/:version/github/requests/validate", srv.WithAuth(srv.validateGithubAuthCallback))
+	srv.POST("/:version/oidc/requests/validate", srv.WithAuth(srv.validateOIDCAuthCallback))
 
 	// Migrated/deleted endpoints with 501 Not Implemented handlers.
 	srv.POST("/:version/reversetunnels", httpMigratedHandler)
@@ -557,6 +558,36 @@ func (s *APIServer) validateGithubAuthCallback(auth *ServerWithRoles, w http.Res
 	for i, ca := range response.HostSigners {
 		data, err := services.MarshalCertAuthority(
 			ca, services.WithVersion(version), services.PreserveRevision())
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		raw.HostSigners[i] = data
+	}
+	return &raw, nil
+}
+
+func (s *APIServer) validateOIDCAuthCallback(auth *ServerWithRoles, _ http.ResponseWriter, r *http.Request, _ httprouter.Params, version string) (interface{}, error) {
+	var req authclient.ValidateOIDCAuthCallbackReq
+	if err := httplib.ReadJSON(r, &req); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	response, err := auth.ValidateOIDCAuthCallback(r.Context(), req.Query)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	raw := authclient.OIDCAuthRawResponse{
+		Username: response.Username, Identity: response.Identity, Cert: response.Cert, TLSCert: response.TLSCert,
+		Req: response.Req, MFAToken: response.MFAToken, ClientOptions: response.ClientOptions,
+	}
+	if response.Session != nil {
+		raw.Session, err = services.MarshalWebSession(response.Session, services.WithVersion(version), services.PreserveRevision())
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+	}
+	raw.HostSigners = make([]json.RawMessage, len(response.HostSigners))
+	for i, ca := range response.HostSigners {
+		data, err := services.MarshalCertAuthority(ca, services.WithVersion(version), services.PreserveRevision())
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}

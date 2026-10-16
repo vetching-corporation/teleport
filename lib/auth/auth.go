@@ -974,6 +974,9 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (as *Server, err error) {
 	if _, ok := as.getCache(); !ok {
 		as.logger.WarnContext(closeCtx, "Auth server starting without cache (may have negative performance implications)")
 	}
+	if as.oidcAuthService == nil && modules.GetModules().BuildType() != modules.BuildEnterprise {
+		as.SetOIDCService(&ossOIDCService{auth: as})
+	}
 
 	return as, nil
 }
