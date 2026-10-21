@@ -20,6 +20,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sync"
@@ -221,6 +222,91 @@ func Test_sessionHandler(t *testing.T) {
 				require.Len(t, clientMessages, 1)
 				checkToolsListResponse(t, clientMessages[0], clientReq.ID, tt.allowedTools)
 			})
+		})
+	}
+}
+
+func Test_sessionHandlerToolsListKeepsResultFields(t *testing.T) {
+	inputResult := `{
+		"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "test-server", "version": "1.0.0"}},
+		"resultType": "complete",
+		"ttlMs": 0,
+		"cacheScope": "private",
+		"tools": [
+			{"name": "read_file", "inputSchema": {"type": "object"}, "execution": {"taskSupport": "optional"}},
+			{"name": "write_file", "inputSchema": {"type": "object"}}
+		]
+	}`
+
+	tests := []struct {
+		name          string
+		setupOptions  []setupTestContextOptionFunc
+		expectedTools string
+	}{
+		{
+			name:          "readonly",
+			setupOptions:  []setupTestContextOptionFunc{withProdReadOnlyRole(t)},
+			expectedTools: `[{"name": "read_file", "inputSchema": {"type": "object"}, "execution": {"taskSupport": "optional"}}]`,
+		},
+		{
+			name: "no-access",
+			setupOptions: []setupTestContextOptionFunc{
+				withAdminRole(t),
+				withDenyToolsRole(t),
+			},
+			expectedTools: `[]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Given
+			ctx := t.Context()
+			testCtx := setupTestContext(t, tt.setupOptions...)
+			auditor, err := newSessionAuditor(sessionAuditorConfig{
+				emitter:    &eventstest.MockRecorderEmitter{},
+				hostID:     "test-host-id",
+				sessionCtx: testCtx.SessionCtx,
+				preparer:   &libevents.NoOpPreparer{},
+			})
+			require.NoError(t, err)
+			handler, err := newSessionHandler(sessionHandlerConfig{
+				SessionCtx:     testCtx.SessionCtx,
+				sessionAuth:    &sessionAuth{},
+				sessionAuditor: auditor,
+				accessPoint:    fakeAccessPoint{},
+				parentCtx:      ctx,
+			})
+			require.NoError(t, err)
+
+			clientReq := (&requestBuilder{}).makeToolsListRequest()
+			require.Nil(t, handler.processClientRequest(ctx, clientReq))
+			inputResponse := &mcputils.JSONRPCResponse{
+				JSONRPC: mcp.JSONRPC_VERSION,
+				ID:      clientReq.ID,
+				Result:  json.RawMessage(inputResult),
+			}
+
+			// When
+			capture := &captureMessageWriter{}
+			require.NoError(t, handler.onServerResponse(capture)(ctx, inputResponse))
+
+			// Then
+			clientMessages := capture.messages()
+			require.Len(t, clientMessages, 1)
+			actualJSON, err := json.Marshal(clientMessages[0])
+			require.NoError(t, err)
+			var actualResponse mcputils.JSONRPCResponse
+			require.NoError(t, json.Unmarshal(actualJSON, &actualResponse))
+			require.Equal(t, clientReq.ID.String(), actualResponse.ID.String())
+
+			var actualResult map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(actualResponse.Result, &actualResult))
+			require.JSONEq(t, `{"io.modelcontextprotocol/serverInfo": {"name": "test-server", "version": "1.0.0"}}`, string(actualResult["_meta"]))
+			require.JSONEq(t, `"complete"`, string(actualResult["resultType"]))
+			require.JSONEq(t, `0`, string(actualResult["ttlMs"]))
+			require.JSONEq(t, `"private"`, string(actualResult["cacheScope"]))
+			require.JSONEq(t, tt.expectedTools, string(actualResult["tools"]))
 		})
 	}
 }

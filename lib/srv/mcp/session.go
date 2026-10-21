@@ -20,6 +20,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -281,27 +282,55 @@ func (s *sessionHandler) makeToolsCallResponse(ctx context.Context, resp *mcputi
 		return resp
 	}
 
-	listResult, err := resp.GetListToolResult()
-	if err != nil {
+	// Filter the raw JSON instead of mcp.ListToolsResult so result and tool fields that mcp-go does not model (e.g. resultType, ttlMs and cacheScope required by protocol 2026-07-28) reach the client unchanged.
+	var result map[string]json.RawMessage
+	if err := mcputils.UnmarshalJSONRPCMessage(resp.Result, &result); err != nil {
 		return mcp.NewJSONRPCError(resp.ID, mcp.INTERNAL_ERROR, "failed to unmarshal tools/list response", err)
 	}
 
-	var allowed []mcp.Tool
-	for _, tool := range listResult.Tools {
-		if s.checkAccessToTool(ctx, tool.Name) == nil {
+	var tools []json.RawMessage
+	if rawTools, ok := result[toolsListResultToolsField]; ok {
+		if err := mcputils.UnmarshalJSONRPCMessage(rawTools, &tools); err != nil {
+			return mcp.NewJSONRPCError(resp.ID, mcp.INTERNAL_ERROR, "failed to unmarshal tools/list response", err)
+		}
+	}
+
+	// Always encode an array; clients reject "tools": null when every tool is denied.
+	allowed := make([]json.RawMessage, 0, len(tools))
+	for _, tool := range tools {
+		var toolName struct {
+			Name string `json:"name"`
+		}
+		if err := mcputils.UnmarshalJSONRPCMessage(tool, &toolName); err != nil {
+			return mcp.NewJSONRPCError(resp.ID, mcp.INTERNAL_ERROR, "failed to unmarshal tools/list response", err)
+		}
+		if s.checkAccessToTool(ctx, toolName.Name) == nil {
 			allowed = append(allowed, tool)
 		}
 	}
 
-	s.logger.DebugContext(ctx, "Received tools/list result", "received", len(listResult.Tools), "allowed", len(allowed))
-	listResult.Tools = allowed
+	s.logger.DebugContext(ctx, "Received tools/list result", "received", len(tools), "allowed", len(allowed))
 
-	return mcp.JSONRPCResponse{
+	allowedJSON, err := json.Marshal(allowed)
+	if err != nil {
+		return mcp.NewJSONRPCError(resp.ID, mcp.INTERNAL_ERROR, "failed to marshal tools/list response", err)
+	}
+	result[toolsListResultToolsField] = allowedJSON
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewJSONRPCError(resp.ID, mcp.INTERNAL_ERROR, "failed to marshal tools/list response", err)
+	}
+
+	return &mcputils.JSONRPCResponse{
 		JSONRPC: resp.JSONRPC,
 		ID:      resp.ID,
-		Result:  listResult,
+		Result:  resultJSON,
 	}
 }
+
+// toolsListResultToolsField is the tools/list result field that holds the tool definitions.
+const toolsListResultToolsField = "tools"
 
 func (s *sessionHandler) rewriteHTTPRequestHeaders(r *http.Request) error {
 	jwt, rewriteTraits, err := s.generateJWTAndTraits(r.Context())
