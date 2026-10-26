@@ -19,6 +19,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 env:
   BASE_IMAGE: public.ecr.aws/gravitational/teleport-distroless-debug:${{ inputs.base_image_version || '18.11.3' }}
@@ -62,6 +63,17 @@ jobs:
 
       - name: Check binary
         run: build/teleport version
+
+      # Anonymous pulls from public.ecr.aws hit a shared data limit on GitHub runners; authenticated pulls do not.
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          # Public ECR issues auth tokens only in us-east-1.
+          aws-region: us-east-1
+          role-to-assume: ${{ vars.AWS_SERVER_OIDC_ROLE_ARN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: public.ecr.aws
 
       - uses: docker/login-action@v3
         with:
